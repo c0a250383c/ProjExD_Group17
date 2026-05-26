@@ -11,6 +11,7 @@ Pygameを使用した2Dドット絵スタイルの横スクロールアクショ
 - 拡張性の高いオブジェクト指向設計
 """
 
+import os
 import pygame
 import sys
 from typing import Tuple, List, Optional, Sequence
@@ -289,12 +290,15 @@ class Player:
             self.vy = -Config.PLAYER_JUMP_POWER
             self.is_jumping = True
             self.is_on_ground = False
-    
+            return True
+
+        return False
+
     def apply_gravity(self) -> None:
         """重力を適用してY方向の速度を更新"""
         # 重力加速度を追加
         self.vy += Config.GRAVITY
-        
+
         # 最大落下速度に制限
         if self.vy > Config.MAX_FALL_SPEED:
             self.vy = Config.MAX_FALL_SPEED
@@ -518,8 +522,9 @@ class TitleScene(Scene):
 class GameScene(Scene):
     """ゲーム本編シーン"""
     
-    def __init__(self) -> None:
+    def __init__(self, sound_player: Optional["SoundPlayer"] = None) -> None:
         """ゲーム本編シーンの初期化"""
+        self.sound_player: "SoundPlayer" = sound_player if sound_player is not None else SoundPlayer()
         self.player: Player = Player()
         self.blocks: List[Block] = self._create_stage()
         self.goal: Goal = Goal()
@@ -629,7 +634,9 @@ class GameScene(Scene):
         """
         # キー入力を処理
         keys: pygame.key.ScancodeWrapper = pygame.key.get_pressed()
-        self.player.handle_input(keys)
+        jumped = self.player.handle_input(keys)
+        if jumped:
+            self.sound_player.play_jump()
         
         # ESCキーでタイトルに戻る
         if keys[pygame.K_ESCAPE]:
@@ -647,6 +654,8 @@ class GameScene(Scene):
         
         # ゲームオーバー判定（プレイヤーの Y 座標が画面外）
         if self.player.y > Config.SCREEN_HEIGHT + 100:
+            self.sound_player.play_death()
+            pygame.time.wait(1500)
             return SceneType.GAME_OVER
         
         return None
@@ -846,11 +855,18 @@ class MusicPlayer:
         self.filepath = filepath
         self.playing = False
 
+    @property
+    def resolved_path(self) -> str:
+        """音声ファイルのパスをスクリプトの位置基準で解決する"""
+        if os.path.isabs(self.filepath):
+            return self.filepath
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), self.filepath)
+
     def play(self):
         """BGMをループ再生する"""
         try:
             if not self.playing:
-                pygame.mixer.music.load(self.filepath)
+                pygame.mixer.music.load(self.resolved_path)
                 pygame.mixer.music.play(-1)  # -1で無限ループ
                 self.playing = True
         except pygame.error as e:
@@ -861,6 +877,71 @@ class MusicPlayer:
         pygame.mixer.music.stop()
         self.playing = False
 
+
+class SoundPlayer:
+    def __init__(self, filepath_map: Optional[dict[str, str]] = None) -> None:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+
+        pygame.mixer.set_num_channels(16)
+
+        self.filepath_map: dict[str, str] = filepath_map or {
+            "jump": "和太鼓でドン.wav",      # .mp3 から .wav または .ogg に変更
+            "death": "ちゃんちゃん_1.wav", # .mp3 から .wav に変更
+            "fire": "ボヨン.wav",           # .mp3 から .wav に変更
+            "enemy": "会心の一撃2.wav",    # .mp3 から .wav に変更
+            "star": "シャキーン1.wav",     # .mp3 から .wav に変更
+        }
+        # ... (以降の処理はそのまま)
+        self.sounds: dict[str, pygame.mixer.Sound] = {}
+
+        for name, filename in self.filepath_map.items():
+            resolved = self._resolve_path(filename)
+            if not os.path.exists(resolved):
+                print(f"効果音ファイルが見つかりません: {resolved}")
+                continue
+
+            try:
+                self.sounds[name] = pygame.mixer.Sound(resolved)
+            except pygame.error as e:
+                print(f"{name}の読み込みに失敗しました: {e}")
+
+    def _resolve_path(self, filepath: str) -> str:
+        """効果音ファイルのパスをスクリプトの位置基準で解決する"""
+        if os.path.isabs(filepath):
+            return filepath
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), filepath)
+
+    def play(self, sound_name: str) -> None:
+        """指定した効果音を再生する"""
+        sound = self.sounds.get(sound_name)
+        if sound is None:
+            return
+
+        try:
+            sound.set_volume(1.0)
+            channel = sound.play()
+            if channel is not None:
+                channel.set_volume(1.0)
+        except pygame.error as e:
+            print(f"{sound_name}の再生に失敗しました: {e}")
+
+    def play_jump(self) -> None:
+        self.play("jump")
+
+    def play_death(self) -> None:
+        self.play("death")
+
+    def play_fire(self) -> None:
+        self.play("fire")
+
+    def play_enemy(self) -> None:
+        self.play("enemy")
+
+    def play_star(self) -> None:
+        self.play("star")
+
+
 class Game:
     """
     ゲーム全体を管理するメインクラス
@@ -868,10 +949,13 @@ class Game:
     
     def __init__(self) -> None:
         """ゲームの初期化"""
+        pygame.mixer.pre_init(44100, -16, 2, 512)
         pygame.init()
         # ミキサーの初期化（重要）
         pygame.mixer.init()
-        
+
+        self.sound_player = SoundPlayer()
+
         # BGMプレイヤーのインスタンス作成
         self.music_player = MusicPlayer("Seven_Bells_Ringing.mp3")
         # BGMを再生開始
@@ -887,7 +971,7 @@ class Game:
         self.current_scene_type: SceneType = SceneType.TITLE
         self.scenes: dict = {
             SceneType.TITLE: TitleScene(),
-            SceneType.GAME: GameScene(),
+            SceneType.GAME: GameScene(self.sound_player),
             SceneType.GAME_OVER: GameOverScene(),
             SceneType.GAME_CLEAR: GameClearScene()
         }
@@ -923,7 +1007,7 @@ class Game:
             self.current_scene_type = next_scene_type
             # シーン切り替え時に新しいインスタンスを作成（状態をリセット）
             if self.current_scene_type == SceneType.GAME:
-                self.scenes[SceneType.GAME] = GameScene()
+                self.scenes[SceneType.GAME] = GameScene(self.sound_player)
             elif self.current_scene_type == SceneType.GAME_OVER:
                 self.scenes[SceneType.GAME_OVER] = GameOverScene()
             elif self.current_scene_type == SceneType.GAME_CLEAR:
